@@ -25,12 +25,6 @@ Outputs:
     - Z-Scores
     - Direct dependencies matrix in json format
 Usage:
-    - python CcorrND.py <input_data> <spline_number> <max_time_delay>
-
-
-
-
-
-
+    - python CcorrND.py <input_file> <s> <r>
 
 '''
