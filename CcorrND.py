@@ -1,31 +1,27 @@
-# def CcorrND(input_file, s, r, maxCount):
-# uncomment above and indent all below to make function
-# comment sys.argv lines below, also
+
 '''
 
 Usage:
-    - python CcorrND.py input_data s r maxCount
+    - python CcorrND.py <input_data> <spline_number> <max_time_delay>
 
 Input Arguments:
 
 :input_file         Data Format:3 bioreps per 12 time point samples - rows = genes; columns = time points
-:s                  spline number
+:s                  max value for linearly spaced vector (for cubic spline interoplation)
 :r                  max time delay
-:maxCount           maximum number of ranked edges to save to file
+:thres              threshold for skipping genes in time sample alignment (for cxcorr values)
 
 Steps:
     - computes averages for each time point sample
     - converts data to 1-hour intervals
     - converts data to z-scores
-    - runs cross correlation and network deconvolution for each gene
-    - ranks gene-gene interactions
+    - runs cross correlation to find time delays
+    - align time samples and perform spearman rank then network deconvolution for each gene
 
 Outputs:
     - Averaged data
     - Z-Scores
-    - Direct dependencies matrix
-    - Time Delay matrix
-    - Ranked List of gene-gene interactions
+    - Direct dependencies matrix in json format
 
 '''
 
@@ -33,26 +29,20 @@ import sys, os.path
 import pandas as pd
 import numpy as np
 from numpy.linalg import norm
+from numpy.fft import fft, ifft
 from scipy.interpolate import interp1d
 from scipy.stats import zscore
-from operator import itemgetter
+from itertools import izip
 import ntpath
+from scipy.stats import spearmanr
+import json
 
 __author__ = 'Rob Moseley'
 
-sys.path.insert(0, '/Users/rkd/Desktop/Ccorr/Network-Deconvolution-python')
-from ND import ND
-
-
-# sys.path.insert(0,'/Users/rkd/Desktop/Ccorr/Network-Deconvolution-python')
-# from test_ND import ND
-
-# comment lines out for making function
 input_file = sys.argv[1]
 s = int(sys.argv[2])
 r = int(sys.argv[3])
-maxCount = int(sys.argv[4])
-
+thres = float(sys.argv[4])
 
 def cxcorr(a, b):
     """
@@ -63,24 +53,13 @@ def cxcorr(a, b):
     """
     a /= norm(a)  # normalization
     b /= norm(b)  # normalization
-    b = np.asarray(b)
-    a = np.asarray(a)
-    c = []
-    for k in range(len(b)):
-        cor = sum(a * b.conj().transpose())
-        c.append(cor)
-        # circular shift
-        b = np.insert(b, 0, b[-1])
-        b = b[:-1]
-    a = range(len(b))  # lags
-    return a, c
+    coeff = ifft(fft(a) * fft(b).conj()).real
+    lag = range(len(b))
+    return lag, coeff
 
-
-# path = os.path.dirname(file)
-# fileName = os.path.basename(file)[0]
 fileName = os.path.splitext(ntpath.basename(input_file))[0]
 
-if not os.path.exists(fileName + "output"):
+if not os.path.exists(fileName + "_output"):
     os.makedirs(fileName + "_output")
 
 # get biorep data
@@ -121,95 +100,71 @@ splineMatrix.index = data.index
 zscoreMatrix = splineMatrix.apply(zscore, axis=1)
 zscoreMatrix.to_csv(fileName + "_output/" + fileName + "_zScores.txt", sep='\t')
 
-# print zscoreMatrix.corr(method='spearman')
-
 # run algorithm on z-scores
 numbGenes = len(zscoreMatrix.index)
 geneNames = zscoreMatrix.index
-final_network = []
-final_timeDelays = []
 T = int(s) - 1
-idxMemory = range(zscoreMatrix.shape[0])
+corrdDict = {}
 
 for i in range(numbGenes):
-    print str(i + 1) + ". Determing potential regulators for: " + geneNames[i]
+    colDict = {}
+    print str(i + 1) + ". Determining potential regulators for: " + geneNames[i]
     Li = []
     maxCC = []
     for j in range(numbGenes):
-        # print i, j
         lag, ccorr = cxcorr(zscoreMatrix.iloc[j, :], zscoreMatrix.iloc[i, :])
-        # print "\t" + geneNames[j]   +": lag = " + str(lag) + " - ccorr = " + str(ccorr)
         # get max absolute ccorr value and respective index within max time delay
-        maxAbsCcorr = max(ccorr[:r], key=abs)
-        maxAbsCcorrIdx = np.argmax(np.absolute(ccorr[:r]))
+        maxAbsCcorr = max(ccorr[:r + 1], key=abs)
+        maxAbsCcorrIdx = np.argmax(np.absolute(ccorr[:r + 1]))
         maxCC.append(abs(maxAbsCcorr))
         # get lag value
         Li.append(lag[maxAbsCcorrIdx])
-
+    print "Thresholding..."
+    idxMemory = []
+    adjLi = []
     geneIdx = 0
     for k in range(numbGenes):
-        if k == i:
-            geneIdx = k
-	# initialize matrix with zeros
+        if maxCC[k] >= thres:
+            if k == i:
+                geneIdx = k
+            idxMemory.append(k)
+            adjLi.append(Li[k])
+    print "Aligning time samples..."
     Xi = np.zeros(shape=(len(idxMemory), zscoreMatrix.shape[1]))
     # get vector of time samples for target gene (i)
     X = np.asarray(zscoreMatrix[geneIdx:geneIdx + 1])
-    X = np.concatenate((X[:, r:T], X[:, :r]), axis=1)
+    X = np.concatenate((X[:, r + 1:T], X[:, :r + 1]), axis=1)
     Xi[[idxMemory.index(x) for x in idxMemory if x == geneIdx], :] = X
     # get vectors of time samples for potential regulators (j)
     for j in range(len(idxMemory)):
         jIdx = idxMemory[j]
         if jIdx != geneIdx:  # ignore target gene (i)
-            Lij = Li[jIdx]
+            Lij = adjLi[j]
             xj = np.asarray(zscoreMatrix[jIdx:jIdx + 1])
-            xj = np.concatenate((xj[:, r - Lij:], xj[:, :r - Lij]), axis=1)  # extract time samples
+            xj = np.concatenate((xj[:, r + 1 - Lij:], xj[:, :r + 1 - Lij]), axis=1)  # extract time samples
             Xi[[idxMemory.index(x) for x in idxMemory if x == jIdx], :] = xj  # align time samples
     # stack sequences row wise and convert to dataframe
     Xi = pd.DataFrame(np.vstack(Xi)).transpose()
     print "Number of genes: " + str(Xi.shape[1])
     # add vectors of zeros if Xi only contains gene i
-    # transpose so genes are columns and create spearman correlaton matrix (goes col by col)
-    C = Xi.corr(method='spearman')
-    C.to_csv(fileName + "_output/" + fileName + "_spearmanMat.txt", sep="\t")
-    # apply network deconvolution
-    NetDe = ND(C.as_matrix())
-    # get vector which contains the direct dependencies between i and its potential regulators
-    # gene i will be first column/row
-    NDi = np.asarray(NetDe[i, :])
-    # add to final network
-    final_network.append(NDi)
-    # add time delays to final matrix
-    final_timeDelays.append(np.asarray(Li))
+    if Xi.shape[1] == 1:
+        colDict[i] = (1, 0, 0)
 
-# Save network and time delays
-FN = pd.DataFrame(final_network)
-FN.index = geneNames
-FN.columns = geneNames
-FN.to_csv(fileName + "_output/" + fileName + "_GRN.txt", sep='\t')
+    elif Xi.shape[1] == 2:
+        # mess up here, self regulation numbers are wrong, but they will be dropped later on anyway
+        C, pval = spearmanr(Xi[0], Xi[1])
+        for col, td in izip(idxMemory, adjLi):
+            colDict[col] = (C, pval, td)
 
-FD = pd.DataFrame(final_timeDelays)
-FD.index = geneNames
-FD.columns = geneNames
-FD.to_csv(fileName + "_output/" + fileName + "_TimeDelays.txt", sep='\t')
+    else:
+        C, pval = spearmanr(Xi)
+        ###########  apply ND to spearman matrix ###########
+        Ci = C[idxMemory.index(i)]
+        pvali = pval[idxMemory.index(i)]
+        for col, s, p, td in izip(idxMemory, Ci, pvali, adjLi):
+            colDict[col] = (s, p, td)
 
-print "Ranking interactions..."
-rankedList = []
-# extract ccorr and time delay for each gene pair
-for i in range(len(final_network)):
-    for j in range(len(final_network)):
-        if final_network[i][j] >= 0.7:
-            rankedList.append([geneNames[i], geneNames[j], final_network[i][j], final_timeDelays[i][j]])
-rankedList = sorted(rankedList, key=itemgetter(2), reverse=True)
+    corrdDict[i] = colDict
 
-nWrite = len(rankedList)
-if nWrite < maxCount > 0:
-    nWrite = int(maxCount)
-
-outfile = open(fileName + "_output/" + fileName + "_Ranked_List.txt", 'w')
-outfile.write("Source\tTarget\tCcorr\tTimeDelay\n")
-for i in range(nWrite):
-    (TF, target, CC, TD) = rankedList[i]
-    CC = float(CC)
-    TD = float(TD)
-    outfile.write("%s\t%s\t%.5f\t%d\n" % (TF, target, CC, TD))
-outfile.close()
+with open(fileName + "_output/" + fileName + "_output.json", "w") as outfile:
+    json.dump(corrdDict, outfile, sort_keys=True, indent=2)
