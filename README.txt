@@ -25,6 +25,6 @@ Outputs:
     - Z-Scores
     - Direct dependencies matrix in json format
 Usage:
-    - python CcorrND.py <input_file> <s> <r>
+    - python CcorrND.py <input_file> <s> <r> <thres>
 
 '''
