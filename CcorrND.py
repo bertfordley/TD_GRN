@@ -124,6 +124,9 @@ for i in range(numbGenes):
     adjLi = []
     geneIdx = 0
     for k in range(numbGenes):
+        # drop genes with ccorr below certain threshold
+        # this thresholding will be removed when ND is applied
+        # as all genes are required for ND
         if maxCC[k] >= thres:
             if k == i:
                 geneIdx = k
